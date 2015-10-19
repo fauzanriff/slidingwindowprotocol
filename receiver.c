@@ -1,4 +1,4 @@
-/* File : T1_rx.cpp */
+/* File : receiver.c */
 
 #include "receiver.h"
 
@@ -76,12 +76,17 @@ static Byte *rcvchar(int sockfd, QTYPE *queue)
  	char tempBuf[1];
  	char b[1];
  	static int counter = 1;
+ 	//////////
+ 	char string[128];
+ 	MESGB *pmsg =(MESGB *) malloc(sizeof(MESGB));
 
- 	if (recvfrom(sockfd, tempBuf, 1, 0, (struct sockaddr *) &srcAddr, &srcLen) < 0)
+ 	if (recvfrom(sockfd, string, sizeof(MESGB), 0, (struct sockaddr *) &srcAddr, &srcLen) < sizeof(MESGB))
  		error("ERROR: Failed to receive character from socket\n");
-
+ 	printf("\n");
+ 	memcpy(pmsg,string,sizeof(MESGB));
  	current = (Byte *) malloc(sizeof(Byte));
- 	*current = tempBuf[0];
+ 	//printf("%s\n", );
+ 	//*current = (Byte *) pmsg->data->txt[0];
 
  	if (*current != Endfile) {
  		printf("Receiving byte no. %d: ", counter++);
@@ -94,7 +99,7 @@ static Byte *rcvchar(int sockfd, QTYPE *queue)
 						printf("\'End of File\'\n");
 						break;
 			case 255:	break;
-			default:	printf("\'%c\'\n", *current);
+			default:	printf("\'%c\'\n", pmsg->data[0]);
 						break;
 		}
  	}

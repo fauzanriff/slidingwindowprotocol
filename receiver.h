@@ -54,13 +54,14 @@ typedef struct QTYPE {
  	Byte *data;
 } QTYPE;
 
+
 typedef struct MESGB {
  	unsigned int soh;
  	unsigned int stx;
  	unsigned int etx;
  	Byte checksum;
  	Byte msgno;
- 	Byte *data;
+ 	char data[1];
 } MESGB;
 
 /* FUNCTIONS AND PROCEDURES */
