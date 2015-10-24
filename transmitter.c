@@ -1,7 +1,5 @@
- /* File 	: transmitter.c */
-#include "transmitter.h"
-#include "receiver.h"
-#include "cksum.h"
+/* File 	: transmitter.c */
+#include "header.h"
 
 /* NETWORKS */
 int sockfd, port;		// sock file descriptor and port number
@@ -11,16 +9,34 @@ int receiverAddrLen = sizeof(receiverAddr);
 
 /* FILE AND BUFFERS */
 FILE *tFile;			// file descriptor
-char *receiverIP;		// buffer for Host IP address
-char buf[BUFMAX+1];		// buffer for character to send
-char xbuf[BUFMAX+1];	// buffer for receiving XON/XOFF characters
+char buf[BUFMAX];		// buffer for read characters
+
+/* WINDOW */ 
+MESGB rxbuf[WINDOWSIZE];
+QTYPE trmq = { 0, 0, 0, WINDOWSIZE, rxbuf};
+QTYPE *rxq = &trmq;
+
+/* SEND WINDOW */
+MESGB rxsend[WINDOWSIZE];
+QTYPE trsend = { 0, 0, 0, WINDOWSIZE, rxsend};
+QTYPE *rxnd = &trsend;
+
+/* QTEMP */
+RESPL tab[WINDOWSIZE];
+QTemp temp = { 0, 0, 0, WINDOWSIZE, tab};
+QTemp *ptemp = &temp;
 
 /* FLAGS */
-int isXON = 1;		// flag for XON/XOFF sent
 int isSocketOpen;	// flag to indicate if connection from socket is done
 
+/* VOIDS */
+void *firstChild(void *threadid);
+void *secondChild(void *threadid);
+void receiveACK(QTYPE *queue,QTYPE *qsend,QTemp *temp);
+void sendFrame(QTYPE *qsend);
+
 int main(int argc, char *argv[]) {
-	pthread_t thread[1];
+	pthread_t thread[2];
 
 	if (argc < 4) {
 		// case if arguments are less than specified
@@ -47,67 +63,49 @@ int main(int argc, char *argv[]) {
 
 	// open the text file
 	tFile = fopen(argv[argc-1], "r");
-	if (tFile == NULL) 
+	if(tFile == NULL) 
 		error("ERROR: File text not Found.\n");
 
-	if (pthread_create(&thread[0], NULL, childProcess, 0) != 0) 
+	// sending frame thread
+	if(pthread_create(&thread[0], NULL, firstChild, 0) != 0) 
 		error("ERROR: Failed to create thread for child. Please free some space.\n");
-	//INI NGISI MESGB
-	int i = 0;
-	char data[BUFMAX+1];
-	while(i<BUFMAX && (data[i]  = fgetc(tFile) != EOF)) 
-		i++;	
-	
-	MESGB msg = {SOH,STX,ETX,cksum(data, BUFMAX+1),0,data};
 
-	char string[128];
-	memcpy(string,&msg,sizeof(MESGB));
-	///SELESAI///
-	// this is the parent process
-	// use as char transmitter from the text file
-	// connect to receiver, and read the file per character
-	int counter = 1;
-	while ((msg.data[0] = fgetc(tFile)) != EOF) {
-		if (isXON) {
-			if (sendto(sockfd, string, sizeof(MESGB), 0, (const struct sockaddr *) &receiverAddr, receiverAddrLen) > sizeof(MESGB))
-				error("ERROR: sendto() sent buffer with size more than expected.\n");
-			
-			printf("Sending byte no. %d: ", counter++);
-			switch (input.txt[0]) {
-				case CR:	printf("\'Carriage Return\'\n");
-							break;
-				case LF:	printf("\'Line Feed\'\n");
-							break;
-				case Endfile:
-							printf("\'End of File\'\n");
-							break;
-				case 255:	break;
-				default:	printf("\'%c\'\n", input.txt[0]);
-							break;
-			}
-		} else {
-			while (!isXON) {
-				printf("Waiting for XON...\n");
-				sleep(1);
-			}
+	// receiving ack thread
+	if(pthread_create(&thread[1], NULL, secondChild, 0) != 0) 
+		error("ERROR: Failed to create thread for child. Please free some space.\n");
+
+	// parent process
+	int counter = 0;
+	while(1) {
+		buf[0] = fgetc(tFile);
+		MESGB msg = { .soh = SOH, .stx = STX, .etx = ETX, .checksum = 0, .msgno = counter++};
+		strcpy(msg.data, buf);
+		while(trmq.count==WINDOWSIZE) /*wait for sending process */{
+			printf("waiting receive ACK\n"); 
+			sleep(1);
 		}
-		sleep(1);
+ 		trmq.window[trmq.rear] = msg;
+ 		trmq.rear++;
+ 		if(trmq.rear==WINDOWSIZE) trmq.rear=0;
+ 		trmq.count++;
+ 		//adding to queue send
+ 		while(trsend.count==WINDOWSIZE);
+ 		trsend.window[trsend.rear] = msg;
+ 		trsend.rear++;
+ 		if(trsend.rear==WINDOWSIZE) trsend.rear=0;
+ 		trsend.count++;
+		sleep(DELAY);
+		if(buf[0]==EOF) break;
 	}
 
 	// sending endfile to receiver, marking the end of data transfer
-	buf[0] = Endfile;
-	sendto(sockfd, buf, BUFMAX, 0, (const struct sockaddr *) &receiverAddr, receiverAddrLen);
+	printf("Sending EOF");
 	fclose(tFile);
 	
-	printf("Byte sending done! Closing sockets...\n");
+	printf("Frame sending done! Closing sockets...\n");
 	close(sockfd);
 	isSocketOpen = 0;
 	printf("Socket Closed!\n");
-
-	// finishing program and closing
-	printf("TRANSMITTER Finished transmitting bytes!\n");
-	printf("TRANSMITTER saying goodbye and thanks!\n");
-
 	return 0;
 }
 
@@ -116,24 +114,110 @@ void error(const char *message) {
 	exit(1);
 }
 
-void *childProcess(void *threadid) {
-	// child process
-	// read if there is XON/XOFF sent by receiver using recvfrom()
-	struct sockaddr_in srcAddr;
-	int srcLen = sizeof(srcAddr);
-	while (isSocketOpen) {
-		if (recvfrom(sockfd, xbuf, BUFMAX, 0, (struct sockaddr *) &srcAddr, &srcLen) != BUFMAX)
-			error("ERROR: recvfrom() receive buffer with size more than expected.\n");
-
-		if (xbuf[0] == XOFF) {
-			isXON = 0;
-			printf("[XOFF] Receiving XOFF. Rest a while buddy...\n");
-		} else if (xbuf[0] == XON) {
-			isXON = 1;
-			printf("[XON] Receiving XON. Work again!\n");
-		} else {
-			printf("What the hell man?\n");
-		}
+void *firstChild(void *threadid) {
+	//this thread used for sending frame process
+	while(1) {
+		sendFrame(rxnd);
+		sleep(DELAY);
 	}
 	pthread_exit(NULL);
+}
+
+void sendFrame(QTYPE *qsend) {
+	//child process for sending frame
+	char string[128];
+	if(qsend->count) {
+		printf("Sending frame no. %d: \'%c\'\n", qsend->window[qsend->front].msgno, qsend->window[qsend->front].data[0]);
+		memcpy(string,&qsend->window[qsend->front],sizeof(MESGB));
+		if(sendto(sockfd, string, sizeof(MESGB), 0, (const struct sockaddr *) &receiverAddr, receiverAddrLen) == sizeof(MESGB)) {
+			qsend->front++;
+			if(qsend->front==WINDOWSIZE) qsend->front=0;
+			qsend->count--;
+		}
+		else error("ERROR: sendto() sent frame with size more than expected.\n");
+	}
+}
+
+void *secondChild(void *threadid) {
+	//this thread used for receiving ack process
+	while(1) {
+		receiveACK(rxq,rxnd,ptemp);
+		sleep(DELAY);
+	}
+	pthread_exit(NULL);	
+}
+
+void receiveACK(QTYPE *queue,QTYPE *qsend, QTemp *temp) {
+	//child process for receiving ack
+	struct sockaddr_in srcAddr;
+	int srcLen = sizeof(srcAddr);
+	char string[128];
+	RESPL *rsp = (RESPL *) malloc(sizeof(RESPL));
+	int wait=0;
+	while (isSocketOpen && wait<1000 && wait>0) {
+		if(recvfrom(sockfd, string, sizeof(RESPL), 0, (struct sockaddr *) &srcAddr, &srcLen) == sizeof(RESPL))
+			wait==-1;
+		else 
+			error("ERROR: Failed to receive frame from socket.\n");
+		memcpy(rsp,string,sizeof(RESPL));
+		if(rsp->msgno == queue->window[queue->front].msgno) {
+			if(rsp->ack == ACK) {
+				//inc *queue head
+				queue->front++;
+				if(queue->front == WINDOWSIZE) queue->front = 0;
+				queue->count--;
+			}
+			else {				
+ 				//adding to queue send
+ 				while(qsend->count==WINDOWSIZE);
+ 				qsend->window[qsend->rear] = queue->window[queue->front];
+ 				qsend->rear++;
+ 				if(qsend->rear==WINDOWSIZE) qsend->rear=0;
+ 				qsend->count++;
+			}
+		}
+		else { 
+			unsigned int i=temp->front;
+			unsigned int n=temp->count; 
+			while(n--) {
+				if(temp->tab[i].msgno==queue->window[queue->front].msgno) break;
+				i++;
+				if(i==WINDOWSIZE) i=0;
+			}
+			if(n) { //if ack with same msgno found in temp
+				if(temp->tab[i].ack == ACK) {
+					//inc *queue head
+					queue->front++;
+					if(queue->front == WINDOWSIZE) queue->front = 0;
+					queue->count--;
+				}
+				else {				
+ 					//adding to queue send
+ 					while(qsend->count==WINDOWSIZE);
+ 					qsend->window[qsend->rear] = queue->window[queue->front];
+ 					qsend->rear++;
+ 					if(qsend->rear==WINDOWSIZE) qsend->rear=0;
+ 					qsend->count++;					
+				}
+			}
+			else {
+				//save in QTemp
+				while(temp->count==WINDOWSIZE);
+				temp->tab[temp->rear++] = *rsp;
+				if(temp->rear==WINDOWSIZE) temp->rear = 0;
+				temp->count++;
+			}
+		}
+		usleep(DELAY);
+		wait++;
+	}
+	if(wait==1000) {
+		//adding to queue send
+		printf("recv timeout, resending head\n");
+		while(qsend->count==WINDOWSIZE);
+		qsend->window[qsend->rear] = queue->window[queue->front];
+		qsend->rear++;
+		if(qsend->rear==WINDOWSIZE) qsend->rear=0;
+		qsend->count++;	
+	}
 }

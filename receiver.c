@@ -1,20 +1,19 @@
 /* File : receiver.c */
+#include "header.h"
 
-#include "receiver.h"
+MESGB *rcvframe(int sockfd, QTYPE *queue);
+MESGB *q_get(QTYPE *queue);
 
-Byte rxbuf[RXQSIZE];
-QTYPE rcvq = { 0, 0, 0, RXQSIZE, rxbuf };
+MESGB rxbuf[WINDOWSIZE];
+QTYPE rcvq = { 0, 0, -1, WINDOWSIZE, rxbuf };
 QTYPE *rxq = &rcvq;
-Byte sent_xonxoff = XON;
-unsigned send_xon = 0,
-send_xoff = 0;
 int endFileReceived;
 
 /* Socket */
 int sockfd; // listen on sock_fd
 struct sockaddr_in adhost;
 struct sockaddr_in srcAddr;
-unsigned int srcLen = sizeof(srcAddr);
+int srcLen = sizeof(srcAddr);
 
 int main(int argc, char *argv[])
 {
@@ -47,151 +46,82 @@ int main(int argc, char *argv[])
  		error("ERROR: Failed to create thread for child.\n");
 
 	/* parent process: unlimited looping */
-	Byte c;
-	while (1) {
- 		c = *(rcvchar(sockfd, rxq));
-
- 		if (c == Endfile)
+	MESGB *c;
+	while(1) {
+ 		c = rcvframe(sockfd, rxq);
+ 		printf("this %d : %s\n", rxq->window[rxq->rear].msgno, rxq->window[rxq->rear].data);
+ 		if(c->data[0] == EOF){
  			endFileReceived = 1;
+ 			printf("File received.");
+ 		}
 	}
-
-	printf("Receiving End of File... Receiver Complete!\n");
-	printf("Waiting for the next transmission...\n");
-
+	printf("Receiving EOF\n");
 	return 0;
 }
-
 
 void error(const char *message) {
 	perror(message);
 	exit(1);
 }
 
-static Byte *rcvchar(int sockfd, QTYPE *queue)
-{
- 	/* Insert code here. Read a character from socket and put it to the receive buffer.
- 	If the number of characters in the receive buffer is above certain level, then send
- 	XOFF and set a flag (why?). Return a pointer to the buffer where data is put. */
- 	Byte* current;
- 	char tempBuf[1];
- 	char b[1];
- 	static int counter = 1;
- 	//////////
+MESGB *rcvframe(int sockfd, QTYPE *queue) {
  	char string[128];
  	MESGB *pmsg =(MESGB *) malloc(sizeof(MESGB));
-
- 	if (recvfrom(sockfd, string, sizeof(MESGB), 0, (struct sockaddr *) &srcAddr, &srcLen) < sizeof(MESGB))
- 		error("ERROR: Failed to receive character from socket\n");
- 	printf("\n");
+ 	if(recvfrom(sockfd, string, sizeof(MESGB), 0, (struct sockaddr *) &srcAddr, &srcLen) < sizeof(MESGB))
+ 		error("ERROR: Failed to receive frame from socket\n");
  	memcpy(pmsg,string,sizeof(MESGB));
- 	
- 	if (pmsg->checksum != cksum(pmsg->data, 4)){
- 		error("ERROR : Data %d received are broken", pmsg->msgno);
- 		//do request the data again
- 	}
 
- 	current = (Byte *) malloc(sizeof(Byte));
- 	//printf("%s\n", );
- 	//*current = (Byte *) pmsg->data->txt[0];
+ 	//receive MESGB
 
- 	if (*current != Endfile) {
- 		printf("Receiving byte no. %d: ", counter++);
-		switch (*current) {
-			case CR:	printf("\'Carriage Return\'\n");
-						break;
-			case LF:	printf("\'Line Feed\'\n");
-						break;
-			case Endfile:
-						printf("\'End of File\'\n");
-						break;
-			case 255:	break;
-			default:	printf("\'%c\'\n", pmsg->data[0]);
-						break;
-		}
- 	}
-
- 	// adding char to buffer and resync the buffer queue
+ 	//adding frame to buffer and resync the buffer queue
  	if (queue->count < 8) {
- 		queue->rear = (queue->count > 0) ? (queue->rear+1) % 8 : queue->rear;
- 		queue->data[queue->rear] = *current;
+ 		printf("qrear : %d qcount : %d\n", queue->rear, queue->count);
+ 		//queue->rear = (queue->count > 0) ? (++queue->rear) % 8 : queue->rear;
+ 		queue->window[++queue->rear] = *pmsg;
+ 		if(queue->rear == WINDOWSIZE) queue->rear = 0;
  		queue->count++;
  	}
-
- 	// if the buffer reaches Minimum Upperlimit, send XOFF to Transmitter
- 	if(queue->count >= (MIN_UPPERLIMIT) && sent_xonxoff == XON) {
- 		printf("[XOFF] Buffer reached Minimum Upperlimit. Sending XOFF to transmitter...\n");
- 		send_xoff = 1; send_xon = 0;
- 		b[0] = sent_xonxoff = XOFF;
-
- 		if(sendto(sockfd, b, 1, 0,(struct sockaddr *) &srcAddr, srcLen) < 0)
- 			error("ERROR: Failed to send XOFF.\n");
- 	}
-
- 	return current;
+ 	return pmsg;
 }
 
-
 void *childRProcess(void *threadid) {
-	Byte *data,
-	*current = NULL;
-
- 	while (1) {
- 		current = q_get(rxq, data);
-
- 		// if end file, quit the process
- 		/*if (current != NULL && endFileReceived)
- 			break;*/
- 		// introduce some delay here
- 		sleep(2);
+ 	MESGB *current;
+ 	while(1) {
+ 		current = q_get(rxq);
+ 		sleep(DELAY);
  	}
-
  	pthread_exit(NULL);
 }
 
-static Byte *q_get(QTYPE *queue, Byte *data)
+MESGB *q_get(QTYPE *queue) {
 /* q_get returns a pointer to the buffer where data is read or NULL if buffer is empty. */
-{
- 	Byte *current = NULL;
- 	char b[1];
- 	static int counter = 1;
-
- 	/* Only consume if the buffer is not empty */
- 	if (queue->count > 0) {
- 		current = (Byte *) malloc(sizeof(Byte));
- 		*current = queue->data[queue->front];
- 		//if (*current == Endfile) exit(0);
- 		// incrementing front (circular) and reducing number of elements
- 		queue->front++;
- 		if (queue->front == 8) queue->front = 0;
- 		queue->count--;
-
- 		printf("CONSUME! Consuming byte no. %d: ", counter++);
-		switch (*current) {
-			case CR:	printf("\'Carriage Return\'\n");
-						break;
-			case LF:	printf("\'Line Feed\'\n");
-						break;
-			case Endfile:
-						printf("\'End of File\'\n");
-						break;
-			case 255:	break;
-			default:	printf("\'%c\'\n", *current);
-						break;
+ 	MESGB *current = (MESGB *) malloc(sizeof(MESGB));
+ 	if(queue->count > 0) {
+ 		char string[128];
+ 		RESPL rsp;
+ 		*current = queue->window[queue->front];
+ 		printf("ack current msgno %d data %s soh %d,%d,%d\n", current->msgno, current->data, current->soh, current->stx, current->etx);
+ 		if(current->soh==SOH && current->stx==STX && current->etx==ETX && sizeof(current->data)==BUFMAX
+ 			/*DISINI TAMBAHIN CHECKSUM*/ ) {
+ 			//RESPL rsp = {ACK, current->msgno, 0};
+ 			rsp.ack = ACK;
+ 			rsp.msgno = current->msgno;
+ 			rsp.checksum = 0;
+ 			printf("nih %d :: %d\n", rsp.msgno, current->msgno);
+ 			queue->front++;
+ 			if(queue->front == WINDOWSIZE) queue->front = 0;
+ 			queue->count--;		
 		}
+		else {
+			//RESPL rsp = {NAK, current->msgno, 0};
+			rsp.ack = NAK;
+ 			rsp.msgno = current->msgno;
+ 			rsp.checksum = 0;
+		}		
+ 		memcpy(string,&rsp,sizeof(RESPL));
+ 		printf("nih %d\n", rsp.msgno);
+		if(sendto(sockfd, string, sizeof(RESPL), 0, (struct sockaddr *) &srcAddr, srcLen) < sizeof(RESPL))
+			error("ERROR: sendto() sent frame with size more than expected.\n");
  	}
-
- 	/* Insert code here.  Retrieve data from buffer, save it to "current" and "data"
- 	If the number of characters in the receive buffer is below certain  level, then send
- 	XON. Increment front index and check for wraparound. */
- 	if (queue->count <= MAX_LOWERLIMIT && sent_xonxoff == XOFF) {
- 		printf("[XON] Buffer reaches Maximum Lowerlimit. Sending XON to transmitter...\n");
- 		send_xon = 1; send_xoff = 0;
-
- 		b[0] = sent_xonxoff = XON;
- 		if(sendto(sockfd, b, 1, 0, (struct sockaddr *) &srcAddr, srcLen) < 0)
- 			error("ERROR: Failed to send XON.\n");
- 	}	
-
- 	// return the Byte consumed
  	return current;
 }
