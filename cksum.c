@@ -12,3 +12,7 @@ Byte cksum(Byte *buf, int count){
     }
     return ~(sum & 0xFFFF);
 }
+
+void initiateCksum(MESGB *message){
+    message->checksum = cksum(message->data, 1);
+}

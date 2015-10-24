@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <string.h>
+#include "cksum.h"
 
 /* ASCII Const */ 
 #define SOH 1 /* Start of Header Character */
@@ -67,12 +68,6 @@ typedef struct RESPL {
 	Byte msgno;
 	Byte checksum;
 } RESPL;
-
-typedef struct QTemp {
-// used for save sent frame msgno
-	unsigned int count, front, rear, maxsize; 
-	RESPL *tab; 
-} QTemp;
 
 /////////////////////
 
